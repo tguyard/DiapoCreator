@@ -4,6 +4,7 @@ pygst.require("0.10")
 import gst
 import pygtk
 import gtk.glade
+import pyexiv2
 
 
 class PictureFactory(gst.Bin):
@@ -23,7 +24,38 @@ class PictureFactory(gst.Bin):
             self.add(self.queue)
 
             self.flip = gst.element_factory_make('videoflip', 'flip')
-            self.flip.set_property('method', 'clockwise')
+            image = pyexiv2.metadata.ImageMetadata(path)
+            image.read()
+            if 'Exif.Image.Orientation' in image.exif_keys:
+                orientation = image['Exif.Image.Orientation'].value
+                if orientation == 1: # Nothing
+                    print 'nothing'
+                elif orientation == 2:  # Vertical Mirror
+                    print "vertical miror"
+                    self.flip.set_property('method', 'vertical-flip')
+                elif orientation == 3:  # Rotation 180
+                    print "180"
+                    self.flip.set_property('method', 'rotate-180')
+                elif orientation == 4:  # Horizontal Mirror
+                    print "horizontal"
+                    self.flip.set_property('method', 'horizontal-flip')
+                elif orientation == 5:  # Horizontal Mirror + Rotation 270
+                    print 'hello'
+                    #self.flip.set_property('method', 'horizontal-flip')
+                elif orientation == 6:  # Rotation 270
+                    print "-90"
+                    self.flip.set_property('method', 'clockwise')
+                elif orientation == 7:  # Vertical Mirror + Rotation 270
+                    print 'hello'
+                    #self.flip.set_property('method', 'horizontal-flip')
+                elif orientation == 8:  # Rotation 90
+                    print '90'
+                    self.flip.set_property('method', 'counterclockwise')
+                else:
+                    print orientation
+                    print type(orientation)
+            else:
+                print "realy nothing"
             self.add(self.flip)
 
             self.csp = gst.element_factory_make('ffmpegcolorspace', 'PictureCsp')
@@ -52,6 +84,7 @@ class PictureFactory(gst.Bin):
                     self.freeze,
                     capsfilter
                     )
+
 
             self.urisrc.sync_state_with_parent()
             self.jpegdec.sync_state_with_parent()
