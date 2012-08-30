@@ -5,10 +5,9 @@ import gst
 import pygtk
 import gtk.glade
 
-_FILTER_CAPS = "video/x-raw-yuv, format=(fourcc)I420, width=(int)720, height=(int)576, framerate=(fraction)0/1"
 
 class PictureFactory(gst.Bin):
-    """ Picture Factory """
+    _FILTER_CAPS = "video/x-raw-yuv, format=(fourcc)I420, width=(int)720, height=(int)576, framerate=(fraction)0/1"
 
     def __init__(self, path, *args, **kwargs):
         gst.Bin.__init__(self, *args, **kwargs)
@@ -20,40 +19,49 @@ class PictureFactory(gst.Bin):
             self.jpegdec = gst.element_factory_make('jpegdec','PictureJpegDec')
             self.add(self.jpegdec)
 
+            self.queue = gst.element_factory_make('queue', 'PictureQueue')
+            self.add(self.queue)
+
             self.flip = gst.element_factory_make('videoflip', 'flip')
             self.flip.set_property('method', 'clockwise')
             self.add(self.flip)
 
-            self.crop = gst.element_factory_make('videobox', 'crop')
-            self.crop.set_property('autocrop', True)
-            self.add(self.crop)
-
-            self.queue = gst.element_factory_make('queue', 'PictureQueue')
-            self.add(self.queue)
-
             self.csp = gst.element_factory_make('ffmpegcolorspace', 'PictureCsp')
             self.add(self.csp)
+
+            videoscale = gst.element_factory_make('videoscale', 'PictureVScale')
+            videoscale.set_property("add_borders", True)
+            self.add(videoscale)
 
             self.freeze = gst.element_factory_make('imagefreeze', 'PictureFreeze')
             self.add(self.freeze)
 
+            capsfilter = gst.element_factory_make("capsfilter", "CapsFilter")
+            caps = gst.Caps(self._FILTER_CAPS)
+            capsfilter.set_property("caps", caps)
+            self.add(capsfilter)
 
             # link elements
             gst.element_link_many(
                     self.urisrc,
                     self.jpegdec,
-                    self.flip,
                     self.queue,
                     self.csp,
-                    self.freeze
+                    videoscale,
+                    self.flip,
+                    self.freeze,
+                    capsfilter
                     )
+
             self.urisrc.sync_state_with_parent()
             self.jpegdec.sync_state_with_parent()
             self.queue.sync_state_with_parent()
             self.csp.sync_state_with_parent()
+            videoscale.sync_state_with_parent()
             self.freeze.sync_state_with_parent()
+            capsfilter.sync_state_with_parent()
 
-            self.add_pad(gst.GhostPad('src', self.freeze.get_pad('src')))
+            self.add_pad(gst.GhostPad('src', capsfilter.get_pad('src')))
 
 class pipeline:
 
@@ -66,50 +74,32 @@ class pipeline:
         self._composition.connect("pad-added", self._on_pad)
         self._pipeline.add(self._composition)
 
-        colorspace = gst.element_factory_make("ffmpegcolorspace", "ffcolorspace")
-        self._pipeline.add(colorspace)
-
-        videoscale = gst.element_factory_make('videoscale', 'PictureVScale')
-        videoscale.set_property("add_borders", True)
-        self._pipeline.add(videoscale)
-
-        capsfilter = gst.element_factory_make("capsfilter", "CapsFilter")
-        caps = gst.Caps(_FILTER_CAPS)
-        capsfilter.set_property("caps", caps)
-        self._pipeline.add(capsfilter)
-
         self._queue = gst.element_factory_make("queue2", "queueVideo")
         self._pipeline.add(self._queue)
 
-        sink = gst.element_factory_make("ximagesink", "sink")
-        sink.set_property("force-aspect-ratio", True)
+        self.colorspace = gst.element_factory_make("ffmpegcolorspace", "ffcolorspace")
+        self._pipeline.add(self.colorspace)
+        self._queue.link(self.colorspace)
+
+        sink = gst.element_factory_make("autovideosink", "sink")
         self._pipeline.add(sink)
-
-
-        gst.element_link_many(
-                colorspace,
-                self._queue,
-                videoscale,
-                capsfilter,
-                sink
-                )
+        self.colorspace.link(sink)
 
         signals = {
                 "on_play_clicked" : self.OnPlay,
                 "on_stop_clicked" : self.OnStop,
                 "on_quit_clicked" : self.OnQuit,
                 }
-        self.wTree = gtk.glade.XML("gui.glade", "mainwindow")
+        self.wTree = gtk.glade.XML("../gui.glade", "mainwindow")
         self.wTree.signal_autoconnect(signals)
 
     def add_image(self, path, duration, autozoom = True):
         image = gst.element_factory_make("gnlsource", "bin %s" % path)
-        _bin= PictureFactory(path)
-        image.add(_bin)
+        image.add(PictureFactory(path))
 
         self._composition.add(image)
         image.set_property("start", self._time_count *  gst.SECOND)
-        image.set_property("duration", (self._time_count + duration) * gst.SECOND)
+        image.set_property("duration", duration * gst.SECOND)
 
         self._time_count += duration
         self._img_count += 1
