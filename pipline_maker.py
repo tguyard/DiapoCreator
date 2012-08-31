@@ -22,40 +22,29 @@ class PictureFactory(gst.Bin):
 
             self.queue = gst.element_factory_make('queue', 'PictureQueue')
             self.add(self.queue)
-
             self.flip = gst.element_factory_make('videoflip', 'flip')
             image = pyexiv2.metadata.ImageMetadata(path)
             image.read()
             if 'Exif.Image.Orientation' in image.exif_keys:
                 orientation = image['Exif.Image.Orientation'].value
                 if orientation == 1: # Nothing
-                    print 'nothing'
+                    pass
                 elif orientation == 2:  # Vertical Mirror
-                    print "vertical miror"
                     self.flip.set_property('method', 'vertical-flip')
                 elif orientation == 3:  # Rotation 180
-                    print "180"
                     self.flip.set_property('method', 'rotate-180')
                 elif orientation == 4:  # Horizontal Mirror
-                    print "horizontal"
                     self.flip.set_property('method', 'horizontal-flip')
                 elif orientation == 5:  # Horizontal Mirror + Rotation 270
-                    print 'hello'
+                    pass
                     #self.flip.set_property('method', 'horizontal-flip')
                 elif orientation == 6:  # Rotation 270
-                    print "-90"
                     self.flip.set_property('method', 'clockwise')
                 elif orientation == 7:  # Vertical Mirror + Rotation 270
-                    print 'hello'
+                    pass
                     #self.flip.set_property('method', 'horizontal-flip')
                 elif orientation == 8:  # Rotation 90
-                    print '90'
                     self.flip.set_property('method', 'counterclockwise')
-                else:
-                    print orientation
-                    print type(orientation)
-            else:
-                print "realy nothing"
             self.add(self.flip)
 
             self.csp = gst.element_factory_make('ffmpegcolorspace', 'PictureCsp')
@@ -84,7 +73,6 @@ class PictureFactory(gst.Bin):
                     self.freeze,
                     capsfilter
                     )
-
 
             self.urisrc.sync_state_with_parent()
             self.jpegdec.sync_state_with_parent()
@@ -131,11 +119,46 @@ class pipeline:
         image.add(PictureFactory(path))
 
         self._composition.add(image)
-        image.set_property("start", self._time_count *  gst.SECOND)
-        image.set_property("duration", duration * gst.SECOND)
+        image.set_property("start", max(0, (self._time_count - 1) *  gst.SECOND))
+        image.set_property("duration", (duration + 1) * gst.SECOND)
+        image.set_property("priority", 3 - self._img_count)
+
+        if self._time_count != 0 :
+            self._make_transition(self._time_count * gst.SECOND, self._composition)
 
         self._time_count += duration
         self._img_count += 1
+
+    def _make_transition(self, time, composition):
+        bin = gst.Bin()
+        alpha1 = gst.element_factory_make("alpha")
+        queue = gst.element_factory_make("queue")
+        smpte  = gst.element_factory_make("smptealpha")
+        smpte.props.type = 21
+        mixer  = gst.element_factory_make("videomixer")
+
+        bin.add(alpha1, queue, smpte, mixer)
+        alpha1.link(mixer)
+        queue.link(smpte)
+        smpte.link(mixer)
+
+        controller = gst.Controller(smpte, "position")
+        controller.set_interpolation_mode("position", gst.INTERPOLATE_LINEAR)
+        controller.set("position", 0, 1.0)
+        controller.set("position", 4.0 * gst.SECOND, 0.0)
+
+        bin.add_pad(gst.GhostPad("sink1", alpha1.get_pad("sink")))
+        bin.add_pad(gst.GhostPad("sink2", queue.get_pad("sink")))
+        bin.add_pad(gst.GhostPad("src",   mixer.get_pad("src")))
+
+        op = gst.element_factory_make("gnloperation")
+        op.add(bin)
+        op.props.start          = max(0, time - 1 * gst.SECOND)
+        op.props.duration       = 2 * gst.SECOND
+        op.props.media_start    = 0
+        op.props.media_duration = 2 * gst.SECOND
+        op.props.priority       = 1
+        composition.add(op)
 
     def _on_pad(self, comp, pad):
         print "pad added!"
@@ -159,11 +182,11 @@ class pipeline:
 
 def __main__():
     p = pipeline()
-    p.add_image("/home/thomas/code/diapo/01.jpeg", 2)
-    p.add_image("/home/thomas/code/diapo/02.jpeg", 2)
-    p.add_image("/home/thomas/code/diapo/36.jpeg", 2)
-    p.add_image("/home/thomas/code/diapo/rotation.jpeg", 2)
-    p.add_image("/home/thomas/code/diapo/03.jpeg", 2)
+    p.add_image("/home/thomas/code/diapo/01.jpeg", 4)
+    p.add_image("/home/thomas/code/diapo/02.jpeg", 4)
+    #p.add_image("/home/thomas/code/diapo/36.jpeg", 4)
+    #p.add_image("/home/thomas/code/diapo/rotation.jpeg", 4)
+    #p.add_image("/home/thomas/code/diapo/03.jpeg", 4)
     p.play()
     gtk.main()
 
