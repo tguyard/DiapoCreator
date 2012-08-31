@@ -1,11 +1,11 @@
 #!/usr/bin/python
-import pygst
-pygst.require("0.10")
+import Queue
+import sys
 import gst
 import pygtk
 import gtk.glade
 import pyexiv2
-
+import gobject
 
 class PictureFactory(gst.Bin):
     _FILTER_CAPS = "video/x-raw-yuv, format=(fourcc)I420, width=(int)720, height=(int)576, framerate=(fraction)0/1"
@@ -69,9 +69,9 @@ class PictureFactory(gst.Bin):
                     self.queue,
                     self.csp,
                     videoscale,
+                    #capsfilter,
                     self.flip,
-                    self.freeze,
-                    capsfilter
+                    self.freeze
                     )
 
             self.urisrc.sync_state_with_parent()
@@ -82,11 +82,13 @@ class PictureFactory(gst.Bin):
             self.freeze.sync_state_with_parent()
             capsfilter.sync_state_with_parent()
 
-            self.add_pad(gst.GhostPad('src', capsfilter.get_pad('src')))
+            self.add_pad(gst.GhostPad('src', self.freeze.get_pad('src')))
 
-class pipeline:
+class Pipeline:
 
     def __init__(self):
+        self.q = Queue.Queue()
+        self._TRANSITION_DURATION = 1 * gst.SECOND
         self._img_count = 0
         self._time_count = 0
         self._pipeline = gst.Pipeline("mypipeline")
@@ -95,36 +97,31 @@ class pipeline:
         self._composition.connect("pad-added", self._on_pad)
         self._pipeline.add(self._composition)
 
-        self._queue = gst.element_factory_make("queue2", "queueVideo")
-        self._pipeline.add(self._queue)
-
-        self.colorspace = gst.element_factory_make("ffmpegcolorspace", "ffcolorspace")
-        self._pipeline.add(self.colorspace)
-        self._queue.link(self.colorspace)
+        self._colorspace = gst.element_factory_make("ffmpegcolorspace", "ffcolorspace")
+        self._pipeline.add(self._colorspace)
 
         sink = gst.element_factory_make("autovideosink", "sink")
         self._pipeline.add(sink)
-        self.colorspace.link(sink)
-
-        signals = {
-                "on_play_clicked" : self.OnPlay,
-                "on_stop_clicked" : self.OnStop,
-                "on_quit_clicked" : self.OnQuit,
-                }
-        self.wTree = gtk.glade.XML("../gui.glade", "mainwindow")
-        self.wTree.signal_autoconnect(signals)
+        self._colorspace.link(sink)
 
     def add_image(self, path, duration, autozoom = True):
-        image = gst.element_factory_make("gnlsource", "bin %s" % path)
-        image.add(PictureFactory(path))
+        self.image = gst.element_factory_make("gnlsource", "bin %s" % path)
+        self.image.add(PictureFactory(path))
 
-        self._composition.add(image)
-        image.set_property("start", max(0, (self._time_count - 1) *  gst.SECOND))
-        image.set_property("duration", (duration + 1) * gst.SECOND)
-        image.set_property("priority", 3 - self._img_count)
+        self._composition.add(self.image)
+        if self._img_count == 0:
+            self.image.set_property("start", 0)
+            self.image.set_property("duration", duration)
+            self.image.set_property("media_duration", duration)
+        else:
+            self.image.set_property("start", self._time_count - self._TRANSITION_DURATION)
+            self.image.set_property("duration", duration + self._TRANSITION_DURATION)
+            self.image.set_property("media_duration", duration + self._TRANSITION_DURATION)
+        self.image.set_property("media_start", 0)
+        self.image.set_property("priority", 1 + self._img_count % 2)
 
         if self._time_count != 0 :
-            self._make_transition(self._time_count * gst.SECOND, self._composition)
+            self._make_transition(self._time_count, self._composition)
 
         self._time_count += duration
         self._img_count += 1
@@ -133,19 +130,19 @@ class pipeline:
         bin = gst.Bin()
         alpha1 = gst.element_factory_make("alpha")
         queue = gst.element_factory_make("queue")
-        smpte  = gst.element_factory_make("smptealpha")
-        smpte.props.type = 21
+        alpha2  = gst.element_factory_make("alpha")
         mixer  = gst.element_factory_make("videomixer")
 
-        bin.add(alpha1, queue, smpte, mixer)
+        bin.add(alpha1, queue, alpha2, mixer)
         alpha1.link(mixer)
-        queue.link(smpte)
-        smpte.link(mixer)
+        queue.link(alpha2)
+        alpha2.link(mixer)
 
-        controller = gst.Controller(smpte, "position")
-        controller.set_interpolation_mode("position", gst.INTERPOLATE_LINEAR)
-        controller.set("position", 0, 1.0)
-        controller.set("position", 4.0 * gst.SECOND, 0.0)
+        controller = gst.Controller(alpha2, "alpha")
+        controller.set_interpolation_mode("alpha", gst.INTERPOLATE_LINEAR)
+        controller.set("alpha", 0, 0.0)
+        controller.set("alpha", self._TRANSITION_DURATION, 1.0)
+        self.q.put(controller)
 
         bin.add_pad(gst.GhostPad("sink1", alpha1.get_pad("sink")))
         bin.add_pad(gst.GhostPad("sink2", queue.get_pad("sink")))
@@ -153,42 +150,46 @@ class pipeline:
 
         op = gst.element_factory_make("gnloperation")
         op.add(bin)
-        op.props.start          = max(0, time - 1 * gst.SECOND)
-        op.props.duration       = 2 * gst.SECOND
+        op.props.start          = self._time_count - self._TRANSITION_DURATION
+        op.props.duration       = self._TRANSITION_DURATION
         op.props.media_start    = 0
-        op.props.media_duration = 2 * gst.SECOND
-        op.props.priority       = 1
+        op.props.media_duration = self._TRANSITION_DURATION
+        op.props.priority       = 0
         composition.add(op)
+
+        print op.props.start
+        print op.props.duration
 
     def _on_pad(self, comp, pad):
         print "pad added!"
-        convpad = self._queue.get_compatible_pad(pad, pad.get_caps())
+        convpad = self._colorspace.get_compatible_pad(pad, pad.get_caps())
         pad.link(convpad)
 
-    def OnPlay(self, widget):
-        print "play"
+    def play(self):
+        loop = gobject.MainLoop(is_running=True)
+        bus = self._pipeline.get_bus()
+        bus.add_signal_watch()
+        def on_message(bus, message, loop):
+            if message.type == gst.MESSAGE_EOS:
+                loop.quit()
+            elif message.type == gst.MESSAGE_ERROR:
+                print message
+                loop.quit()
+        bus.connect("message", on_message, loop)
         self._pipeline.set_state(gst.STATE_PLAYING)
-
-    def OnStop(self, widget):
-        print "stop"
+        loop.run()
         self._pipeline.set_state(gst.STATE_NULL)
 
-    def OnQuit(self, widget):
-        print "quitting"
-        gtk.main_quit()
-
-    def play(self):
-        self._pipeline.set_state(gst.STATE_PLAYING)
 
 def __main__():
-    p = pipeline()
-    p.add_image("/home/thomas/code/diapo/01.jpeg", 4)
-    p.add_image("/home/thomas/code/diapo/02.jpeg", 4)
-    #p.add_image("/home/thomas/code/diapo/36.jpeg", 4)
-    #p.add_image("/home/thomas/code/diapo/rotation.jpeg", 4)
-    #p.add_image("/home/thomas/code/diapo/03.jpeg", 4)
+    gobject.threads_init()
+    p = Pipeline()
+    p.add_image("/home/thomas/code/diapo/01.jpeg", 2 * gst.SECOND)
+    p.add_image("/home/thomas/code/diapo/02.jpeg", 2 * gst.SECOND)
+    p.add_image("/home/thomas/code/diapo/36.jpeg", 2 * gst.SECOND)
+    p.add_image("/home/thomas/code/diapo/rotation.jpeg", 2 * gst.SECOND)
+    p.add_image("/home/thomas/code/diapo/03.jpeg", 2 * gst.SECOND)
     p.play()
-    gtk.main()
 
 if __name__ == "__main__":
     __main__()
