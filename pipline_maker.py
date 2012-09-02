@@ -7,14 +7,14 @@ import gtk.glade
 import pyexiv2
 import gobject
 
+FILTER_CAPS = "video/x-raw-yuv, format=(fourcc)I420, width=(int)720, height=(int)576, framerate=(fraction)0/1"
 class PictureFactory(gst.Bin):
-    _FILTER_CAPS = "video/x-raw-yuv, format=(fourcc)I420, width=(int)720, height=(int)576, framerate=(fraction)0/1"
 
     def __init__(self, path, *args, **kwargs):
         gst.Bin.__init__(self, *args, **kwargs)
-        self.uri = 'file://%s' % path
-        if self.uri and gst.uri_is_valid(self.uri):
-            self.urisrc = gst.element_make_from_uri(gst.URI_SRC, self.uri, "urisrc")
+        uri = 'file://%s' % path
+        if uri and gst.uri_is_valid(uri):
+            self.urisrc = gst.element_make_from_uri(gst.URI_SRC, uri, "urisrc")
             self.add(self.urisrc)
 
             self.jpegdec = gst.element_factory_make('jpegdec','PictureJpegDec')
@@ -37,12 +37,10 @@ class PictureFactory(gst.Bin):
                     self.flip.set_property('method', 'horizontal-flip')
                 elif orientation == 5:  # Horizontal Mirror + Rotation 270
                     pass
-                    #self.flip.set_property('method', 'horizontal-flip')
                 elif orientation == 6:  # Rotation 270
                     self.flip.set_property('method', 'clockwise')
                 elif orientation == 7:  # Vertical Mirror + Rotation 270
                     pass
-                    #self.flip.set_property('method', 'horizontal-flip')
                 elif orientation == 8:  # Rotation 90
                     self.flip.set_property('method', 'counterclockwise')
             self.add(self.flip)
@@ -50,37 +48,29 @@ class PictureFactory(gst.Bin):
             self.csp = gst.element_factory_make('ffmpegcolorspace', 'PictureCsp')
             self.add(self.csp)
 
-            videoscale = gst.element_factory_make('videoscale', 'PictureVScale')
-            videoscale.set_property("add_borders", True)
-            self.add(videoscale)
+            self.videoscale = gst.element_factory_make('videoscale', 'PictureVScale')
+            self.videoscale.set_property("add-borders", False)
+            self.add(self.videoscale)
 
             self.freeze = gst.element_factory_make('imagefreeze', 'PictureFreeze')
             self.add(self.freeze)
 
-            capsfilter = gst.element_factory_make("capsfilter", "CapsFilter")
-            caps = gst.Caps(self._FILTER_CAPS)
-            capsfilter.set_property("caps", caps)
-            self.add(capsfilter)
+            self.capsfilter = gst.element_factory_make("capsfilter", "CapsFilter")
+            caps = gst.Caps(FILTER_CAPS)
+            self.capsfilter.set_property("caps", caps)
+            self.add(self.capsfilter)
 
             # link elements
             gst.element_link_many(
                     self.urisrc,
                     self.jpegdec,
+                    self.videoscale,
                     self.queue,
                     self.csp,
-                    videoscale,
-                    #capsfilter,
                     self.flip,
+                    self.capsfilter,
                     self.freeze
                     )
-
-            self.urisrc.sync_state_with_parent()
-            self.jpegdec.sync_state_with_parent()
-            self.queue.sync_state_with_parent()
-            self.csp.sync_state_with_parent()
-            videoscale.sync_state_with_parent()
-            self.freeze.sync_state_with_parent()
-            capsfilter.sync_state_with_parent()
 
             self.add_pad(gst.GhostPad('src', self.freeze.get_pad('src')))
 
@@ -100,9 +90,11 @@ class Pipeline:
         self._colorspace = gst.element_factory_make("ffmpegcolorspace", "ffcolorspace")
         self._pipeline.add(self._colorspace)
 
-        sink = gst.element_factory_make("autovideosink", "sink")
+        sink = gst.element_factory_make("xvimagesink", "sink")
+        sink.set_property("force-aspect-ratio", True)
         self._pipeline.add(sink)
-        self._colorspace.link(sink)
+
+        gst.element_link_many(self._colorspace, sink)
 
     def add_image(self, path, duration, autozoom = True):
         self.image = gst.element_factory_make("gnlsource", "bin %s" % path)
@@ -120,23 +112,27 @@ class Pipeline:
         self.image.set_property("media_start", 0)
         self.image.set_property("priority", 1 + self._img_count % 2)
 
-        if self._time_count != 0 :
-            self._make_transition(self._time_count, self._composition)
+        #if self._time_count != 0 :
+        #    self._make_transition(self._time_count, self._composition)
 
         self._time_count += duration
         self._img_count += 1
 
     def _make_transition(self, time, composition):
         bin = gst.Bin()
-        alpha1 = gst.element_factory_make("alpha")
+        caps = gst.Caps(FILTER_CAPS)
+
+        alpha1 = gst.element_factory_make("alpha", "alpha1")
         queue = gst.element_factory_make("queue")
-        alpha2  = gst.element_factory_make("alpha")
+        alpha2  = gst.element_factory_make("alpha", "alpha2")
+        scale = gst.element_factory_make("videoscale", "scale2")
+        scale.set_property("add-borders", True)
+
         mixer  = gst.element_factory_make("videomixer")
 
-        bin.add(alpha1, queue, alpha2, mixer)
-        alpha1.link(mixer)
-        queue.link(alpha2)
-        alpha2.link(mixer)
+        bin.add(queue, alpha2, scale, alpha1, mixer)
+        gst.element_link_many(alpha1, mixer)
+        gst.element_link_many(queue, alpha2, scale, mixer)
 
         controller = gst.Controller(alpha2, "alpha")
         controller.set_interpolation_mode("alpha", gst.INTERPOLATE_LINEAR)
@@ -144,8 +140,8 @@ class Pipeline:
         controller.set("alpha", self._TRANSITION_DURATION, 1.0)
         self.q.put(controller)
 
-        bin.add_pad(gst.GhostPad("sink1", alpha1.get_pad("sink")))
-        bin.add_pad(gst.GhostPad("sink2", queue.get_pad("sink")))
+        bin.add_pad(gst.GhostPad("sink2", alpha1.get_pad("sink")))
+        bin.add_pad(gst.GhostPad("sink1", queue.get_pad("sink")))
         bin.add_pad(gst.GhostPad("src",   mixer.get_pad("src")))
 
         op = gst.element_factory_make("gnloperation")
@@ -156,9 +152,6 @@ class Pipeline:
         op.props.media_duration = self._TRANSITION_DURATION
         op.props.priority       = 0
         composition.add(op)
-
-        print op.props.start
-        print op.props.duration
 
     def _on_pad(self, comp, pad):
         print "pad added!"
@@ -184,9 +177,9 @@ class Pipeline:
 def __main__():
     gobject.threads_init()
     p = Pipeline()
+    p.add_image("/home/thomas/code/diapo/36.jpeg", 2 * gst.SECOND)
     p.add_image("/home/thomas/code/diapo/01.jpeg", 2 * gst.SECOND)
     p.add_image("/home/thomas/code/diapo/02.jpeg", 2 * gst.SECOND)
-    p.add_image("/home/thomas/code/diapo/36.jpeg", 2 * gst.SECOND)
     p.add_image("/home/thomas/code/diapo/rotation.jpeg", 2 * gst.SECOND)
     p.add_image("/home/thomas/code/diapo/03.jpeg", 2 * gst.SECOND)
     p.play()
