@@ -14,15 +14,15 @@ class PictureFactory(gst.Bin):
         gst.Bin.__init__(self, *args, **kwargs)
         uri = 'file://%s' % path
         if uri and gst.uri_is_valid(uri):
-            self.urisrc = gst.element_make_from_uri(gst.URI_SRC, uri, "urisrc")
-            self.add(self.urisrc)
+            urisrc = gst.element_make_from_uri(gst.URI_SRC, uri, "urisrc")
+            self.add(urisrc)
 
-            self.jpegdec = gst.element_factory_make('jpegdec','PictureJpegDec')
-            self.add(self.jpegdec)
+            jpegdec = gst.element_factory_make('jpegdec','pic-jpegdec')
+            self.add(jpegdec)
 
-            self.queue = gst.element_factory_make('queue', 'PictureQueue')
-            self.add(self.queue)
-            self.flip = gst.element_factory_make('videoflip', 'flip')
+            queue = gst.element_factory_make('queue', "pic-queue")
+            self.add(queue)
+            flip = gst.element_factory_make('videoflip', 'pic-flip')
             image = pyexiv2.metadata.ImageMetadata(path)
             image.read()
             if 'Exif.Image.Orientation' in image.exif_keys:
@@ -30,105 +30,107 @@ class PictureFactory(gst.Bin):
                 if orientation == 1: # Nothing
                     pass
                 elif orientation == 2:  # Vertical Mirror
-                    self.flip.set_property('method', 'vertical-flip')
+                    flip.set_property('method', 'vertical-flip')
                 elif orientation == 3:  # Rotation 180
-                    self.flip.set_property('method', 'rotate-180')
+                    flip.set_property('method', 'rotate-180')
                 elif orientation == 4:  # Horizontal Mirror
-                    self.flip.set_property('method', 'horizontal-flip')
+                    flip.set_property('method', 'horizontal-flip')
                 elif orientation == 5:  # Horizontal Mirror + Rotation 270
                     pass
                 elif orientation == 6:  # Rotation 270
-                    self.flip.set_property('method', 'clockwise')
+                    flip.set_property('method', 'clockwise')
                 elif orientation == 7:  # Vertical Mirror + Rotation 270
                     pass
                 elif orientation == 8:  # Rotation 90
-                    self.flip.set_property('method', 'counterclockwise')
-            self.add(self.flip)
+                    flip.set_property('method', 'counterclockwise')
+            self.add(flip)
 
-            self.csp = gst.element_factory_make('ffmpegcolorspace', 'PictureCsp')
-            self.add(self.csp)
+            csp = gst.element_factory_make('ffmpegcolorspace', 'pic-colorspace')
+            self.add(csp)
 
-            self.videoscale = gst.element_factory_make('videoscale', 'PictureVScale')
-            self.videoscale.set_property("add-borders", False)
-            self.add(self.videoscale)
+            videoscale = gst.element_factory_make('videoscale', 'pic-scale')
+            videoscale.set_property("add-borders", False)
+            self.add(videoscale)
 
-            self.freeze = gst.element_factory_make('imagefreeze', 'PictureFreeze')
-            self.add(self.freeze)
+            freeze = gst.element_factory_make('imagefreeze', 'pic-freeze')
+            self.add(freeze)
 
-            self.capsfilter = gst.element_factory_make("capsfilter", "CapsFilter")
+            capsfilter = gst.element_factory_make("capsfilter", "pic-capsfilter")
             caps = gst.Caps(FILTER_CAPS)
-            self.capsfilter.set_property("caps", caps)
-            self.add(self.capsfilter)
+            capsfilter.set_property("caps", caps)
+            self.add(capsfilter)
 
             # link elements
             gst.element_link_many(
-                    self.urisrc,
-                    self.jpegdec,
-                    self.videoscale,
-                    self.queue,
-                    self.csp,
-                    self.flip,
-                    self.capsfilter,
-                    self.freeze
+                    urisrc,
+                    jpegdec,
+                    videoscale,
+                    queue,
+                    csp,
+                    flip,
+                    capsfilter,
+                    freeze
                     )
 
-            self.add_pad(gst.GhostPad('src', self.freeze.get_pad('src')))
+            self.add_pad(gst.GhostPad('src', freeze.get_pad('src')))
 
 class Pipeline:
 
     def __init__(self):
         self.q = Queue.Queue()
-        self._TRANSITION_DURATION = 1 * gst.SECOND
         self._img_count = 0
-        self._time_count = 0
+        self._time = 0
         self._pipeline = gst.Pipeline("mypipeline")
 
-        self._composition = gst.element_factory_make("gnlcomposition", "mycomposition")
+        self._composition = gst.element_factory_make("gnlcomposition", "composition")
         self._composition.connect("pad-added", self._on_pad)
         self._pipeline.add(self._composition)
 
-        self._colorspace = gst.element_factory_make("ffmpegcolorspace", "ffcolorspace")
-        self._pipeline.add(self._colorspace)
+        self._queue = gst.element_factory_make("queue", "queue")
+        self._pipeline.add(self._queue)
+        colorspace = gst.element_factory_make("ffmpegcolorspace", "colorspace")
+        self._pipeline.add(colorspace)
 
         sink = gst.element_factory_make("xvimagesink", "sink")
         sink.set_property("force-aspect-ratio", True)
         self._pipeline.add(sink)
 
-        gst.element_link_many(self._colorspace, sink)
+        gst.element_link_many(self._queue, colorspace, sink)
 
     def add_image(self, path, duration, autozoom = True):
-        self.image = gst.element_factory_make("gnlsource", "bin %s" % path)
-        self.image.add(PictureFactory(path))
+        image = gst.element_factory_make("gnlsource", "bin %s" % path)
+        image.add(PictureFactory(path))
 
-        self._composition.add(self.image)
+        transition_duration = min(5 * gst.SECOND, duration / 3)
+        self._composition.add(image)
         if self._img_count == 0:
-            self.image.set_property("start", 0)
-            self.image.set_property("duration", duration)
-            self.image.set_property("media_duration", duration)
+            image.set_property("start", 0)
+            image.set_property("duration", duration)
+            image.set_property("media_duration", duration)
         else:
-            self.image.set_property("start", self._time_count - self._TRANSITION_DURATION)
-            self.image.set_property("duration", duration + self._TRANSITION_DURATION)
-            self.image.set_property("media_duration", duration + self._TRANSITION_DURATION)
-        self.image.set_property("media_start", 0)
-        self.image.set_property("priority", 1 + self._img_count % 2)
+            image.set_property("start", self._time - transition_duration)
+            image.set_property("duration", duration + transition_duration)
+            image.set_property("media_duration", duration + transition_duration)
+        image.set_property("media_start", 0)
+        image.set_property("priority", 1 + self._img_count % 2)
 
-        #if self._time_count != 0 :
-        #    self._make_transition(self._time_count, self._composition)
+        #if self._time != 0 :
+        #    self._make_transition(self._time, transition_duration)
 
-        self._time_count += duration
+        self._time += duration
         self._img_count += 1
 
-    def _make_transition(self, time, composition):
+    def _make_transition(self, time, transition_duration):
         bin = gst.Bin()
         caps = gst.Caps(FILTER_CAPS)
 
-        alpha1 = gst.element_factory_make("alpha", "alpha1")
-        queue = gst.element_factory_make("queue")
-        alpha2  = gst.element_factory_make("alpha", "alpha2")
-        scale = gst.element_factory_make("videoscale", "scale2")
+        alpha1 = gst.element_factory_make("alpha", "transition-alpha1")
+        queue = gst.element_factory_make("queue", "transition-queue")
+        alpha2  = gst.element_factory_make("alpha", "transition-alpha2")
+        scale = gst.element_factory_make("videoscale", "transition-scale")
         scale.set_property("add-borders", True)
 
-        mixer  = gst.element_factory_make("videomixer")
+        mixer  = gst.element_factory_make("videomixer", "transition-mixer")
 
         bin.add(queue, alpha2, scale, alpha1, mixer)
         gst.element_link_many(alpha1, mixer)
@@ -137,7 +139,7 @@ class Pipeline:
         controller = gst.Controller(alpha2, "alpha")
         controller.set_interpolation_mode("alpha", gst.INTERPOLATE_LINEAR)
         controller.set("alpha", 0, 0.0)
-        controller.set("alpha", self._TRANSITION_DURATION, 1.0)
+        controller.set("alpha", transition_duration, 1.0)
         self.q.put(controller)
 
         bin.add_pad(gst.GhostPad("sink2", alpha1.get_pad("sink")))
@@ -146,16 +148,16 @@ class Pipeline:
 
         op = gst.element_factory_make("gnloperation")
         op.add(bin)
-        op.props.start          = self._time_count - self._TRANSITION_DURATION
-        op.props.duration       = self._TRANSITION_DURATION
+        op.props.start          = self._time - transition_duration
+        op.props.duration       = transition_duration
         op.props.media_start    = 0
-        op.props.media_duration = self._TRANSITION_DURATION
+        op.props.media_duration = transition_duration
         op.props.priority       = 0
-        composition.add(op)
+        self._composition.add(op)
 
     def _on_pad(self, comp, pad):
         print "pad added!"
-        convpad = self._colorspace.get_compatible_pad(pad, pad.get_caps())
+        convpad = self._queue.get_compatible_pad(pad, pad.get_caps())
         pad.link(convpad)
 
     def play(self):
