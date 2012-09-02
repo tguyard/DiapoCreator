@@ -74,35 +74,62 @@ class PictureFactory(gst.Bin):
 
             self.add_pad(gst.GhostPad('src', freeze.get_pad('src')))
 
+def find_media_duration(path):
+    d = gst.parse_launch("filesrc name=source ! decodebin2 ! fakesink")
+    source = d.get_by_name("source")
+    source.set_property("location", path)
+    d.set_state(gst.STATE_PLAYING)
+    d.get_state()
+    format = gst.Format(gst.FORMAT_TIME)
+    duration = d.query_duration(format)[0]
+    d.set_state(gst.STATE_NULL)
+    return duration
+
 class Pipeline:
 
     def __init__(self):
         self.q = Queue.Queue()
         self._img_count = 0
-        self._time = 0
+        self._time = 0       # ns
+        self._time_audio = 0 # ns
         self._pipeline = gst.Pipeline("mypipeline")
 
-        self._composition = gst.element_factory_make("gnlcomposition", "composition")
-        self._composition.connect("pad-added", self._on_pad)
-        self._pipeline.add(self._composition)
+        # video
+        self._vcomposition = gst.element_factory_make("gnlcomposition", "video-composition")
+        self._vcomposition.connect("pad-added", self._video_on_pad)
+        self._pipeline.add(self._vcomposition)
 
-        self._queue = gst.element_factory_make("queue", "queue")
-        self._pipeline.add(self._queue)
+        self._vqueue = gst.element_factory_make("queue", "video-queue")
+        self._pipeline.add(self._vqueue)
         colorspace = gst.element_factory_make("ffmpegcolorspace", "colorspace")
         self._pipeline.add(colorspace)
 
-        sink = gst.element_factory_make("xvimagesink", "sink")
-        sink.set_property("force-aspect-ratio", True)
-        self._pipeline.add(sink)
+        vsink = gst.element_factory_make("xvimagesink", "video-sink")
+        vsink.set_property("force-aspect-ratio", True)
+        self._pipeline.add(vsink)
 
-        gst.element_link_many(self._queue, colorspace, sink)
+        gst.element_link_many(self._vqueue, colorspace, vsink)
+
+        # audio
+        self._acomposition = gst.element_factory_make("gnlcomposition", "audio-composition")
+        self._acomposition.connect("pad-added", self._audio_on_pad)
+        self._pipeline.add(self._acomposition)
+
+        self._aqueue = gst.element_factory_make("queue", "audio-queue")
+        self._pipeline.add(self._aqueue)
+
+        asink = gst.element_factory_make("autoaudiosink", "audio-sink")
+        self._pipeline.add(asink)
+
+        gst.element_link_many(self._aqueue, asink)
+
 
     def add_image(self, path, duration, autozoom = True):
         image = gst.element_factory_make("gnlsource", "bin %s" % path)
         image.add(PictureFactory(path))
 
         transition_duration = min(5 * gst.SECOND, duration / 3)
-        self._composition.add(image)
+        self._vcomposition.add(image)
         if self._img_count == 0:
             image.set_property("start", 0)
             image.set_property("duration", duration)
@@ -119,6 +146,16 @@ class Pipeline:
 
         self._time += duration
         self._img_count += 1
+
+    def add_music(self, path, duration):
+        source = gst.element_factory_make("gnlfilesource", "music-src")
+        source.set_property("location", path)
+        source.set_property("start", self._time_audio)
+        source.set_property("duration", duration)
+        source.set_property("media_start", 0)
+        source.set_property("media_duration", duration)
+        self._acomposition.add(source)
+        self._time_audio += duration
 
     def _make_transition(self, time, transition_duration):
         bin = gst.Bin()
@@ -153,11 +190,14 @@ class Pipeline:
         op.props.media_start    = 0
         op.props.media_duration = transition_duration
         op.props.priority       = 0
-        self._composition.add(op)
+        self._vcomposition.add(op)
 
-    def _on_pad(self, comp, pad):
-        print "pad added!"
-        convpad = self._queue.get_compatible_pad(pad, pad.get_caps())
+    def _audio_on_pad(self, comp, pad):
+        convpad = self._aqueue.get_compatible_pad(pad, pad.get_caps())
+        pad.link(convpad)
+
+    def _video_on_pad(self, comp, pad):
+        convpad = self._vqueue.get_compatible_pad(pad, pad.get_caps())
         pad.link(convpad)
 
     def play(self):
@@ -184,6 +224,7 @@ def __main__():
     p.add_image("/home/thomas/code/diapo/02.jpeg", 2 * gst.SECOND)
     p.add_image("/home/thomas/code/diapo/rotation.jpeg", 2 * gst.SECOND)
     p.add_image("/home/thomas/code/diapo/03.jpeg", 2 * gst.SECOND)
+    p.add_music("/home/thomas/multimedia/musique/01 - Kids.mp3", find_media_duration("/home/thomas/multimedia/musique/01 - Kids.mp3"))
     p.play()
 
 if __name__ == "__main__":
