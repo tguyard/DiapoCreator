@@ -2,18 +2,65 @@
 import Queue
 import sys
 import gst
-import pygtk
-import gtk.glade
 import pyexiv2
 import gobject
+import cv
+from PIL import Image
+import os
+import tempfile
+
+class AutoZoomParameterFactory:
+
+    def __init__(self, image):
+        self._image = cv.LoadImage(image)
+        self._should_zoom = False
+        self._to_x = 0
+        self._to_y = 0
+        self._to_length = 0
+        self._calculate_space_containing_face(self._image)
+
+    def _detect(self, image):
+        min_size = (20, 20)
+        image_scale = 4
+        haar_scale = 1.2
+        min_neighbors = 1
+        haar_flags = 0
+
+        gray = cv.CreateImage((image.width,image.height), 8, 1)
+        small_img = cv.CreateImage((cv.Round(image.width / image_scale), cv.Round (image.height / image_scale)), 8, 1)
+
+        cv.CvtColor(image, gray, cv.CV_BGR2GRAY)
+        cv.Resize(gray, small_img, cv.CV_INTER_LINEAR)
+        cv.EqualizeHist(small_img, small_img)
+
+        cascade = cv.Load("./haarcascade_frontalface_alt.xml")
+        if(cascade):
+            t = cv.GetTickCount()
+            faces = cv.HaarDetectObjects(small_img, cascade, cv.CreateMemStorage(0), haar_scale, min_neighbors, haar_flags, min_size)
+            t = cv.GetTickCount() - t
+            print "detection time = %gms" % (t/(cv.GetTickFrequency()*1000.))
+            if faces:
+                for ((x, y, w, h), n) in faces:
+                    print (x,y,w,h)
+                    # the input to cv.HaarDetectObjects was resized, so scale the
+                    # bounding box of each face and convert it to two CvPoints
+                    pt1 = (int(x * image_scale), int(y * image_scale))
+                    pt2 = (int((x + w) * image_scale), int((y + h) * image_scale))
+                    cv.Rectangle(image, pt1, pt2, cv.RGB(255, 0, 0), 3, 8, 0)
+
+
+    def _calculate_space_containing_face(self, image):
+        self._detect(image)
 
 FILTER_CAPS = "video/x-raw-yuv, format=(fourcc)I420, width=(int)720, height=(int)576, framerate=(fraction)0/1"
 class PictureFactory(gst.Bin):
 
-    def __init__(self, path, *args, **kwargs):
+    def __init__(self, path, filter_caps, *args, **kwargs):
         gst.Bin.__init__(self, *args, **kwargs)
         uri = 'file://%s' % path
         if uri and gst.uri_is_valid(uri):
+
+
             urisrc = gst.element_make_from_uri(gst.URI_SRC, uri, "urisrc")
             self.add(urisrc)
 
@@ -22,28 +69,6 @@ class PictureFactory(gst.Bin):
 
             queue = gst.element_factory_make('queue', "pic-queue")
             self.add(queue)
-            flip = gst.element_factory_make('videoflip', 'pic-flip')
-            image = pyexiv2.metadata.ImageMetadata(path)
-            image.read()
-            if 'Exif.Image.Orientation' in image.exif_keys:
-                orientation = image['Exif.Image.Orientation'].value
-                if orientation == 1: # Nothing
-                    pass
-                elif orientation == 2:  # Vertical Mirror
-                    flip.set_property('method', 'vertical-flip')
-                elif orientation == 3:  # Rotation 180
-                    flip.set_property('method', 'rotate-180')
-                elif orientation == 4:  # Horizontal Mirror
-                    flip.set_property('method', 'horizontal-flip')
-                elif orientation == 5:  # Horizontal Mirror + Rotation 270
-                    pass
-                elif orientation == 6:  # Rotation 270
-                    flip.set_property('method', 'clockwise')
-                elif orientation == 7:  # Vertical Mirror + Rotation 270
-                    pass
-                elif orientation == 8:  # Rotation 90
-                    flip.set_property('method', 'counterclockwise')
-            self.add(flip)
 
             csp = gst.element_factory_make('ffmpegcolorspace', 'pic-colorspace')
             self.add(csp)
@@ -56,7 +81,7 @@ class PictureFactory(gst.Bin):
             self.add(freeze)
 
             capsfilter = gst.element_factory_make("capsfilter", "pic-capsfilter")
-            caps = gst.Caps(FILTER_CAPS)
+            caps = gst.Caps(filter_caps)
             capsfilter.set_property("caps", caps)
             self.add(capsfilter)
 
@@ -67,7 +92,6 @@ class PictureFactory(gst.Bin):
                     videoscale,
                     queue,
                     csp,
-                    flip,
                     capsfilter,
                     freeze
                     )
@@ -124,9 +148,10 @@ class Pipeline:
         gst.element_link_many(self._aqueue, asink)
 
 
-    def add_image(self, path, duration, autozoom = True):
+    def add_image(self, path, duration):
+        path = self._resize_and_rotate(path)
         image = gst.element_factory_make("gnlsource", "bin %s" % path)
-        image.add(PictureFactory(path))
+        image.add(PictureFactory(path, FILTER_CAPS))
 
         transition_duration = min(5 * gst.SECOND, duration / 3)
         self._vcomposition.add(image)
@@ -159,7 +184,6 @@ class Pipeline:
 
     def _make_transition(self, time, transition_duration):
         bin = gst.Bin()
-        caps = gst.Caps(FILTER_CAPS)
 
         alpha1 = gst.element_factory_make("alpha", "transition-alpha1")
         queue = gst.element_factory_make("queue", "transition-queue")
@@ -200,6 +224,56 @@ class Pipeline:
         convpad = self._vqueue.get_compatible_pad(pad, pad.get_caps())
         pad.link(convpad)
 
+    def _resize_and_rotate(self, path):
+        width=1920
+        height=1080
+        self._image = Image.open(path)
+
+        image = pyexiv2.metadata.ImageMetadata(path)
+        image.read()
+        if 'Exif.Image.Orientation' in image.exif_keys:
+            orientation = image['Exif.Image.Orientation'].value
+            if orientation == 1: # Nothing
+                pass
+            elif orientation == 2:  # Vertical Mirror
+                self._image = self._image.transpose(Image.FLIP_LEFT_RIGHT)
+            elif orientation == 3:  # Rotation 180
+                self._image = self._image.transpose(Image.ROTATE_180)
+            elif orientation == 4:  # Horizontal Mirror
+                self._image = self._image.transpose(Image.FLIP_TOP_BOTTOM)
+            elif orientation == 5:  # Horizontal Mirror + Rotation 270
+                self._image = self._image.transpose(Image.FLIP_TOP_BOTTOM)
+                self._image = self._image.transpose(Image.ROTATE_270)
+            elif orientation == 6:  # Rotation 270
+                self._image = self._image.transpose(Image.ROTATE_270)
+            elif orientation == 7:  # Vertical Mirror + Rotation 270
+                self._image = self._image.transpose(Image.FLIP_LEFT_RIGHT)
+                self._image = self._image.transpose(Image.ROTATE_270)
+            elif orientation == 8:  # Rotation 90
+                self._image = self._image.transpose(Image.ROTATE_90)
+
+        size = self._image.size
+
+        if float(size[0])/float(size[1]) > float(width)/float(height):
+            new_width = width
+            new_height = (size[1] * width) / size[0]
+        else:
+            new_height = height
+            new_width = (size[0] * height) / size[1]
+
+        self._image = self._image.resize((new_width, new_height), Image.ANTIALIAS)
+        temp = tempfile.NamedTemporaryFile(delete=False, suffix='.jpeg')
+        try:
+            self._image.save(temp, 'jpeg')
+        finally:
+            temp.close()
+
+        AutoZoomParameterFactory(path)
+
+        return temp.name
+
+
+
     def play(self):
         loop = gobject.MainLoop(is_running=True)
         bus = self._pipeline.get_bus()
@@ -219,12 +293,14 @@ class Pipeline:
 def __main__():
     gobject.threads_init()
     p = Pipeline()
-    p.add_image("/home/thomas/code/diapo/36.jpeg", 2 * gst.SECOND)
     p.add_image("/home/thomas/code/diapo/01.jpeg", 2 * gst.SECOND)
     p.add_image("/home/thomas/code/diapo/02.jpeg", 2 * gst.SECOND)
-    p.add_image("/home/thomas/code/diapo/rotation.jpeg", 2 * gst.SECOND)
     p.add_image("/home/thomas/code/diapo/03.jpeg", 2 * gst.SECOND)
-    p.add_music("/home/thomas/multimedia/musique/01 - Kids.mp3", find_media_duration("/home/thomas/multimedia/musique/01 - Kids.mp3"))
+    p.add_image("/home/thomas/multimedia/images/2011/scouts/all/DSC08051.JPG", 2 * gst.SECOND)
+    p.add_image("/home/thomas/code/diapo/36.jpeg", 2 * gst.SECOND)
+    p.add_image("/home/thomas/code/diapo/rotation.jpeg", 2 * gst.SECOND)
+    p.add_music("/home/thomas/multimedia/musique/01 - Kids.mp3", 1)
+    #p.add_music("/home/thomas/multimedia/musique/01 - Kids.mp3", find_media_duration("/home/thomas/multimedia/musique/01 - Kids.mp3"))
     p.play()
 
 if __name__ == "__main__":
