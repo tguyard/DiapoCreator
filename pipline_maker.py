@@ -9,51 +9,11 @@ from PIL import Image
 import os
 import tempfile
 
-class AutoZoomParameterFactory:
+WIDTH=1920
+HEIGHT=1080
+FILTER_CAPS = "video/x-raw-yuv, format=(fourcc)I420, width=(int)%i, height=(int)%i, framerate=(fraction)0/1" % (WIDTH, HEIGHT)
 
-    def __init__(self, image):
-        self._image = cv.LoadImage(image)
-        self._should_zoom = False
-        self._to_x = 0
-        self._to_y = 0
-        self._to_length = 0
-        self._calculate_space_containing_face(self._image)
-
-    def _detect(self, image):
-        min_size = (20, 20)
-        image_scale = 4
-        haar_scale = 1.2
-        min_neighbors = 1
-        haar_flags = 0
-
-        gray = cv.CreateImage((image.width,image.height), 8, 1)
-        small_img = cv.CreateImage((cv.Round(image.width / image_scale), cv.Round (image.height / image_scale)), 8, 1)
-
-        cv.CvtColor(image, gray, cv.CV_BGR2GRAY)
-        cv.Resize(gray, small_img, cv.CV_INTER_LINEAR)
-        cv.EqualizeHist(small_img, small_img)
-
-        cascade = cv.Load("./haarcascade_frontalface_alt.xml")
-        if(cascade):
-            t = cv.GetTickCount()
-            faces = cv.HaarDetectObjects(small_img, cascade, cv.CreateMemStorage(0), haar_scale, min_neighbors, haar_flags, min_size)
-            t = cv.GetTickCount() - t
-            print "detection time = %gms" % (t/(cv.GetTickFrequency()*1000.))
-            if faces:
-                for ((x, y, w, h), n) in faces:
-                    print (x,y,w,h)
-                    # the input to cv.HaarDetectObjects was resized, so scale the
-                    # bounding box of each face and convert it to two CvPoints
-                    pt1 = (int(x * image_scale), int(y * image_scale))
-                    pt2 = (int((x + w) * image_scale), int((y + h) * image_scale))
-                    cv.Rectangle(image, pt1, pt2, cv.RGB(255, 0, 0), 3, 8, 0)
-
-
-    def _calculate_space_containing_face(self, image):
-        self._detect(image)
-
-FILTER_CAPS = "video/x-raw-yuv, format=(fourcc)I420, width=(int)720, height=(int)576, framerate=(fraction)0/1"
-class PictureFactory(gst.Bin):
+class PictureVideoClip(gst.Bin):
 
     def __init__(self, path, filter_caps, *args, **kwargs):
         gst.Bin.__init__(self, *args, **kwargs)
@@ -97,6 +57,92 @@ class PictureFactory(gst.Bin):
                     )
 
             self.add_pad(gst.GhostPad('src', freeze.get_pad('src')))
+
+class Picture:
+    def __init__(self, path):
+        self._path = self._resize_and_rotate(path)
+        #self._has_faces, self._bl_point, self._tr_point = self._detect_faces(self._path)
+
+    def _resize_and_rotate(self, path):
+        image = Image.open(path)
+
+        image_metadata = pyexiv2.metadata.ImageMetadata(path)
+        image_metadata.read()
+        if 'Exif.Image.Orientation' in image_metadata.exif_keys:
+            orientation = image_metadata['Exif.Image.Orientation'].value
+            if orientation == 1: # Nothing
+                pass
+            elif orientation == 2:  # Vertical Mirror
+                image = image.transpose(Image.FLIP_LEFT_RIGHT)
+            elif orientation == 3:  # Rotation 180
+                image = image.transpose(Image.ROTATE_180)
+            elif orientation == 4:  # Horizontal Mirror
+                image = image.transpose(Image.FLIP_TOP_BOTTOM)
+            elif orientation == 5:  # Horizontal Mirror + Rotation 270
+                image = image.transpose(Image.FLIP_TOP_BOTTOM).transpose(Image.ROTATE_270)
+            elif orientation == 6:  # Rotation 270
+                image = image.transpose(Image.ROTATE_270)
+            elif orientation == 7:  # Vertical Mirror + Rotation 270
+                image = image.transpose(Image.FLIP_LEFT_RIGHT).transpose(Image.ROTATE_270)
+            elif orientation == 8:  # Rotation 90
+                image = image.transpose(Image.ROTATE_90)
+
+        size = image.size
+
+        if float(size[0])/float(size[1]) > float(WIDTH)/float(HEIGHT):
+            new_width = WIDTH
+            new_height = (size[1] * WIDTH) / size[0]
+        else:
+            new_height = HEIGHT
+            new_width = (size[0] * HEIGHT) / size[1]
+
+        image = image.resize((new_width, new_height), Image.ANTIALIAS)
+        tmp_image = Image.new("RGBA", (WIDTH, HEIGHT), (0,0,0,255))
+        tmp_image.paste(image, ((WIDTH - new_width) / 2, (HEIGHT - new_height) / 2))
+        image = tmp_image
+        temp = tempfile.NamedTemporaryFile(delete=False, suffix='.jpeg')
+        try:
+            image.save(temp, 'jpeg')
+        finally:
+            temp.close()
+
+        return temp.name
+
+    def _detect_faces(self, path):
+        image = cv.LoadImage(path)
+        min_size = (20, 20)
+        image_scale = 3
+        haar_scale = 1.2
+        min_neighbors = 1
+        haar_flags = 0
+
+        face_detected = False
+        lower_point = (sys.maxint, sys.maxint)
+        higher_point = (0, 0)
+
+        gray = cv.CreateImage((image.width,image.height), 8, 1)
+        small_img = cv.CreateImage((cv.Round(image.width / image_scale), cv.Round (image.height / image_scale)), 8, 1)
+
+        cv.CvtColor(image, gray, cv.CV_BGR2GRAY)
+        cv.Resize(gray, small_img, cv.CV_INTER_LINEAR)
+        cv.EqualizeHist(small_img, small_img)
+
+        cascade = cv.Load("./haarcascade_frontalface_alt.xml")
+        if(cascade):
+            t = cv.GetTickCount()
+            faces = cv.HaarDetectObjects(small_img, cascade, cv.CreateMemStorage(0), haar_scale, min_neighbors, haar_flags, min_size)
+            t = cv.GetTickCount() - t
+            print "detection time = %gms" % (t/(cv.GetTickFrequency()*1000.))
+            if faces:
+                face_detected = True
+                for ((x, y, w, h), n) in faces:
+                    lower_point = (min(lower_point[0], x * image_scale), min(lower_point[1], y * image_scale))
+                    lower_point = (max(higher_point[0], (x + w) * image_scale), max(higher_point[1], (y + h) * image_scale))
+
+        return face_detected, lower_point, higher_point
+
+    def get_as_gst_videoclip(self, filter_caps):
+        return PictureVideoClip(self._path, FILTER_CAPS)
 
 def find_media_duration(path):
     d = gst.parse_launch("filesrc name=source ! decodebin2 ! fakesink")
@@ -149,9 +195,8 @@ class Pipeline:
 
 
     def add_image(self, path, duration):
-        path = self._resize_and_rotate(path)
         image = gst.element_factory_make("gnlsource", "bin %s" % path)
-        image.add(PictureFactory(path, FILTER_CAPS))
+        image.add(Picture(path).get_as_gst_videoclip(FILTER_CAPS))
 
         transition_duration = min(5 * gst.SECOND, duration / 3)
         self._vcomposition.add(image)
@@ -166,8 +211,8 @@ class Pipeline:
         image.set_property("media_start", 0)
         image.set_property("priority", 1 + self._img_count % 2)
 
-        #if self._time != 0 :
-        #    self._make_transition(self._time, transition_duration)
+        if self._time != 0 :
+            self._make_transition(self._time, transition_duration)
 
         self._time += duration
         self._img_count += 1
@@ -224,56 +269,6 @@ class Pipeline:
         convpad = self._vqueue.get_compatible_pad(pad, pad.get_caps())
         pad.link(convpad)
 
-    def _resize_and_rotate(self, path):
-        width=1920
-        height=1080
-        self._image = Image.open(path)
-
-        image = pyexiv2.metadata.ImageMetadata(path)
-        image.read()
-        if 'Exif.Image.Orientation' in image.exif_keys:
-            orientation = image['Exif.Image.Orientation'].value
-            if orientation == 1: # Nothing
-                pass
-            elif orientation == 2:  # Vertical Mirror
-                self._image = self._image.transpose(Image.FLIP_LEFT_RIGHT)
-            elif orientation == 3:  # Rotation 180
-                self._image = self._image.transpose(Image.ROTATE_180)
-            elif orientation == 4:  # Horizontal Mirror
-                self._image = self._image.transpose(Image.FLIP_TOP_BOTTOM)
-            elif orientation == 5:  # Horizontal Mirror + Rotation 270
-                self._image = self._image.transpose(Image.FLIP_TOP_BOTTOM)
-                self._image = self._image.transpose(Image.ROTATE_270)
-            elif orientation == 6:  # Rotation 270
-                self._image = self._image.transpose(Image.ROTATE_270)
-            elif orientation == 7:  # Vertical Mirror + Rotation 270
-                self._image = self._image.transpose(Image.FLIP_LEFT_RIGHT)
-                self._image = self._image.transpose(Image.ROTATE_270)
-            elif orientation == 8:  # Rotation 90
-                self._image = self._image.transpose(Image.ROTATE_90)
-
-        size = self._image.size
-
-        if float(size[0])/float(size[1]) > float(width)/float(height):
-            new_width = width
-            new_height = (size[1] * width) / size[0]
-        else:
-            new_height = height
-            new_width = (size[0] * height) / size[1]
-
-        self._image = self._image.resize((new_width, new_height), Image.ANTIALIAS)
-        temp = tempfile.NamedTemporaryFile(delete=False, suffix='.jpeg')
-        try:
-            self._image.save(temp, 'jpeg')
-        finally:
-            temp.close()
-
-        AutoZoomParameterFactory(path)
-
-        return temp.name
-
-
-
     def play(self):
         loop = gobject.MainLoop(is_running=True)
         bus = self._pipeline.get_bus()
@@ -293,12 +288,12 @@ class Pipeline:
 def __main__():
     gobject.threads_init()
     p = Pipeline()
-    p.add_image("/home/thomas/code/diapo/01.jpeg", 2 * gst.SECOND)
-    p.add_image("/home/thomas/code/diapo/02.jpeg", 2 * gst.SECOND)
-    p.add_image("/home/thomas/code/diapo/03.jpeg", 2 * gst.SECOND)
-    p.add_image("/home/thomas/multimedia/images/2011/scouts/all/DSC08051.JPG", 2 * gst.SECOND)
-    p.add_image("/home/thomas/code/diapo/36.jpeg", 2 * gst.SECOND)
-    p.add_image("/home/thomas/code/diapo/rotation.jpeg", 2 * gst.SECOND)
+    p.add_image("/home/thomas/code/diapo/01.jpeg", 1 * gst.SECOND)
+    p.add_image("/home/thomas/code/diapo/02.jpeg", 1 * gst.SECOND)
+    p.add_image("/home/thomas/code/diapo/03.jpeg", 1 * gst.SECOND)
+    p.add_image("/home/thomas/multimedia/images/2011/scouts/all/DSC08051.JPG", 1 * gst.SECOND)
+    p.add_image("/home/thomas/code/diapo/36.jpeg", 1 * gst.SECOND)
+    p.add_image("/home/thomas/code/diapo/rotation.jpeg", 1 * gst.SECOND)
     p.add_music("/home/thomas/multimedia/musique/01 - Kids.mp3", 1)
     #p.add_music("/home/thomas/multimedia/musique/01 - Kids.mp3", find_media_duration("/home/thomas/multimedia/musique/01 - Kids.mp3"))
     p.play()
