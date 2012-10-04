@@ -335,7 +335,7 @@ def __main__():
 
     creator = DiapoCreator()
     for dirname, dirnames, filenames in os.walk(project_dir):
-        if dirname[0] == ".":
+        if os.path.basename(dirname).startswith("."):
             continue
         for filename in filenames:
             path = os.path.join(dirname, filename)
