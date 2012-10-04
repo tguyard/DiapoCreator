@@ -196,7 +196,7 @@ class Pipeline:
 
 
     def add_image(self, path, duration):
-        print path
+        print "Adding image: %s" % path
         image = gst.element_factory_make("gnlsource", "bin %s" % path)
         image.add(Picture(path).get_as_gst_videoclip(FILTER_CAPS))
 
@@ -220,6 +220,7 @@ class Pipeline:
         self._img_count += 1
 
     def add_music(self, path, duration):
+        print "Adding sound: %s" % path
         source = gst.element_factory_make("gnlfilesource", "music-src")
         source.set_property("location", path)
         source.set_property("start", self._time_audio)
@@ -305,6 +306,8 @@ class DiapoCreator:
             raise Exception("No image found! abording ...")
 
         duration = 0
+        self._imgs.sort()
+        self._musics.sort()
         for music in self._musics:
             music_duration = find_media_duration(music)
             duration += music_duration
@@ -328,7 +331,7 @@ def __main__():
     elif len(sys.argv) > 2:
         print "Too many arguments. Only one needed: the directory to use as a DiapoCreator project"
         return -1
-    project_dir = sys.argv[1]
+    project_dir = os.path.abspath(sys.argv[1])
 
     creator = DiapoCreator()
     for dirname, dirnames, filenames in os.walk(project_dir):
