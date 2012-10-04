@@ -148,6 +148,7 @@ def find_media_duration(path):
     d = gst.parse_launch("filesrc name=source ! decodebin2 ! fakesink")
     source = d.get_by_name("source")
     source.set_property("location", path)
+    print path
     d.set_state(gst.STATE_PLAYING)
     d.get_state()
     format = gst.Format(gst.FORMAT_TIME)
@@ -195,6 +196,7 @@ class Pipeline:
 
 
     def add_image(self, path, duration):
+        print path
         image = gst.element_factory_make("gnlsource", "bin %s" % path)
         image.add(Picture(path).get_as_gst_videoclip(FILTER_CAPS))
 
@@ -284,19 +286,64 @@ class Pipeline:
         loop.run()
         self._pipeline.set_state(gst.STATE_NULL)
 
+class DiapoCreator:
+    def __init__(self):
+        self._pipe = Pipeline()
+        self._imgs = list()
+        self._musics = list()
+
+    def add_image(self, path):
+        self._imgs.append(path)
+
+    def add_audio(self, path):
+        self._musics.append(path)
+
+    def terminate_section(self):
+        if len(self._musics) == 0:
+            raise Exception("No sound file found! abording ...")
+        if len(self._imgs) == 0:
+            raise Exception("No image found! abording ...")
+
+        duration = 0
+        for music in self._musics:
+            music_duration = find_media_duration(music)
+            duration += music_duration
+            self._pipe.add_music(music, music_duration)
+
+        image_duration = duration / len(self._imgs)
+        for image in self._imgs:
+            self._pipe.add_image(image, image_duration)
+
+        self._imgs = list()
+        self._musics = list()
+
+    def terminate_diapo(self):
+        self._pipe.play()
 
 def __main__():
     gobject.threads_init()
-    p = Pipeline()
-    p.add_image("/home/thomas/code/diapo/01.jpeg", 1 * gst.SECOND)
-    p.add_image("/home/thomas/code/diapo/02.jpeg", 1 * gst.SECOND)
-    p.add_image("/home/thomas/code/diapo/03.jpeg", 1 * gst.SECOND)
-    p.add_image("/home/thomas/multimedia/images/2011/scouts/all/DSC08051.JPG", 1 * gst.SECOND)
-    p.add_image("/home/thomas/code/diapo/36.jpeg", 1 * gst.SECOND)
-    p.add_image("/home/thomas/code/diapo/rotation.jpeg", 1 * gst.SECOND)
-    p.add_music("/home/thomas/multimedia/musique/01 - Kids.mp3", 1)
-    #p.add_music("/home/thomas/multimedia/musique/01 - Kids.mp3", find_media_duration("/home/thomas/multimedia/musique/01 - Kids.mp3"))
-    p.play()
+
+    if len(sys.argv) == 1:
+        print "Using current directory as DiapoCreator project"
+    elif len(sys.argv) > 2:
+        print "Too many arguments. Only one needed: the directory to use as a DiapoCreator project"
+        return -1
+    project_dir = sys.argv[1]
+
+    creator = DiapoCreator()
+    for dirname, dirnames, filenames in os.walk(project_dir):
+        if dirname[0] == ".":
+            continue
+        for filename in filenames:
+            path = os.path.join(dirname, filename)
+            ignore, extension = os.path.splitext(path)
+            if extension in (".mp3", ".wav", ".ogg"):
+                creator.add_audio(path)
+            elif extension in (".jpeg", ".jpg", ".JPG", ".JPEG", ".png", ".PNG"):
+                creator.add_image(path)
+        creator.terminate_section()
+    creator.terminate_diapo()
+
 
 if __name__ == "__main__":
     __main__()
